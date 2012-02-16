@@ -94,7 +94,7 @@ Dsymbol *Dsymbol::syntaxCopy(Dsymbol *s)
  *      TRUE,  *ps = symbol: The one and only one symbol
  */
 
-int Dsymbol::oneMember(Dsymbol **ps)
+int Dsymbol::oneMember(Dsymbol **ps, Identifier *ident)
 {
     //printf("Dsymbol::oneMember()\n");
     *ps = this;
@@ -115,7 +115,7 @@ int Dsymbol::oneMembers(Dsymbols *members, Dsymbol **ps, Identifier *ident)
         for (size_t i = 0; i < members->dim; i++)
         {   Dsymbol *sx = (*members)[i];
 
-            int x = sx->oneMember(ps);
+            int x = sx->oneMember(ps, ident);
             //printf("\t[%d] kind %s = %d, s = %p\n", i, sx->kind(), x, *ps);
             if (!x)
             {
@@ -641,22 +641,49 @@ void Dsymbol::checkDeprecated(Loc loc, Scope *sc)
 
 Module *Dsymbol::getModule()
 {
-    Module *m;
-    Dsymbol *s;
-
     //printf("Dsymbol::getModule()\n");
     TemplateDeclaration *td = getFuncTemplateDecl(this);
     if (td)
         return td->getModule();
 
-    s = this;
+    Dsymbol *s = this;
     while (s)
     {
-        //printf("\ts = '%s'\n", s->toChars());
-        m = s->isModule();
+        //printf("\ts = %s '%s'\n", s->kind(), s->toPrettyChars());
+        Module *m = s->isModule();
         if (m)
             return m;
         s = s->parent;
+    }
+    return NULL;
+}
+
+/**********************************
+ * Determine which Module a Dsymbol is in, as far as access rights go.
+ */
+
+Module *Dsymbol::getAccessModule()
+{
+    //printf("Dsymbol::getAccessModule()\n");
+    TemplateDeclaration *td = getFuncTemplateDecl(this);
+    if (td)
+        return td->getAccessModule();
+
+    Dsymbol *s = this;
+    while (s)
+    {
+        //printf("\ts = %s '%s'\n", s->kind(), s->toPrettyChars());
+        Module *m = s->isModule();
+        if (m)
+            return m;
+        TemplateInstance *ti = s->isTemplateInstance();
+        if (ti && ti->isnested)
+            /* Because of local template instantiation, the parent isn't where the access
+             * rights come from - it's the template declaration
+             */
+            s = ti->tempdecl;
+        else
+            s = s->parent;
     }
     return NULL;
 }
@@ -794,18 +821,20 @@ Dsymbol *ScopeDsymbol::search(Loc loc, Identifier *ident, int flags)
             //printf("\tscanning import '%s', prots = %d, isModule = %p, isImport = %p\n", ss->toChars(), prots[i], ss->isModule(), ss->isImport());
             /* Don't find private members if ss is a module
              */
-            s2 = ss->search(loc, ident, ss->isImport() ? 1 : 0);
+            s2 = ss->search(loc, ident, ss->isModule() ? 1 : 0);
             if (!s)
                 s = s2;
             else if (s2 && s != s2)
             {
                 if (s->toAlias() == s2->toAlias())
                 {
-                    /* After following aliases, we found the same symbol,
-                     * so it's not an ambiguity.
-                     * But if one alias is deprecated, prefer the other.
+                    /* After following aliases, we found the same
+                     * symbol, so it's not an ambiguity.  But if one
+                     * alias is deprecated or less accessible, prefer
+                     * the other.
                      */
-                    if (s->isDeprecated())
+                    if (s->isDeprecated() ||
+                        s2->prot() > s->prot() && s2->prot() != PROTnone)
                         s = s2;
                 }
                 else
@@ -835,7 +864,8 @@ Dsymbol *ScopeDsymbol::search(Loc loc, Identifier *ident, int flags)
                             {   Dsymbol *s3 = a->a[j];
                                 if (s2->toAlias() == s3->toAlias())
                                 {
-                                    if (s3->isDeprecated())
+                                    if (s3->isDeprecated() ||
+                                        s2->prot() > s3->prot() && s2->prot() != PROTnone)
                                         a->a[j] = s2;
                                     goto Lcontinue;
                                 }

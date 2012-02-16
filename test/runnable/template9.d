@@ -1,5 +1,7 @@
 // PERMUTE_ARGS:
 
+// Note: compiling this overflows the stack if dmd is build with DEBUG
+
 module breaker;
 
 import std.c.stdio;
@@ -495,8 +497,6 @@ void test6208a()
     assert(xm.f!int(0) == 1);   // ditto
 }
 
-/**********************************/
-
 void test6208b()
 {
     void foo(T)(const T value) if (!is(T == int)) {}
@@ -505,6 +505,69 @@ void test6208b()
     const int cn;
     static assert(!__traits(compiles, foo(mn)));    // OK -> OK
     static assert(!__traits(compiles, foo(cn)));    // NG -> OK
+}
+
+void test6208c()
+{
+    struct S
+    {
+        // Original test case.
+        int foo(V)(in V v)                         { return 1; }
+        int foo(Args...)(auto ref const Args args) { return 2; }
+
+        // Reduced test cases
+
+        int hoo(V)(const V v)             { return 1; }  // typeof(10) : const V       -> MATCHconst
+        int hoo(Args...)(const Args args) { return 2; }  // typeof(10) : const Args[0] -> MATCHconst
+        // If deduction matching level is same, tuple parameter is less specialized than others.
+
+        int bar(V)(V v)                   { return 1; }  // typeof(10) : V             -> MATCHexact
+        int bar(Args...)(const Args args) { return 2; }  // typeof(10) : const Args[0] -> MATCHconst
+
+        int baz(V)(const V v)             { return 1; }  // typeof(10) : const V -> MATCHconst
+        int baz(Args...)(Args args)       { return 2; }  // typeof(10) : Args[0] -> MATCHexact
+
+        inout(int) war(V)(inout V v)            { return 1; }
+        inout(int) war(Args...)(inout Args args){ return 2; }
+
+        inout(int) waz(Args...)(inout Args args){ return 0; }   // wild deduction test
+    }
+
+    S s;
+
+    int nm = 10;
+    assert(s.foo(nm) == 1);
+    assert(s.hoo(nm) == 1);
+    assert(s.bar(nm) == 1);
+    assert(s.baz(nm) == 2);
+    assert(s.war(nm) == 1);
+    static assert(is(typeof(s.waz(nm)) == int));
+
+    const int nc = 10;
+    assert(s.foo(nc) == 1);
+    assert(s.hoo(nc) == 1);
+    assert(s.bar(nc) == 1);
+    assert(s.baz(nc) == 1);
+    assert(s.war(nc) == 1);
+    static assert(is(typeof(s.waz(nc)) == const(int)));
+
+    immutable int ni = 10;
+    assert(s.foo(ni) == 1);
+    assert(s.hoo(ni) == 1);
+    assert(s.bar(ni) == 1);
+    assert(s.baz(ni) == 2);
+    assert(s.war(ni) == 1);
+    static assert(is(typeof(s.waz(ni)) == immutable(int)));
+
+    static assert(is(typeof(s.waz(nm, nm)) == int));
+    static assert(is(typeof(s.waz(nm, nc)) == const(int)));
+    static assert(is(typeof(s.waz(nm, ni)) == const(int)));
+    static assert(is(typeof(s.waz(nc, nm)) == const(int)));
+    static assert(is(typeof(s.waz(nc, nc)) == const(int)));
+    static assert(is(typeof(s.waz(nc, ni)) == const(int)));
+    static assert(is(typeof(s.waz(ni, nm)) == const(int)));
+    static assert(is(typeof(s.waz(ni, nc)) == const(int)));
+    static assert(is(typeof(s.waz(ni, ni)) == immutable(int)));
 }
 
 /**********************************/
@@ -518,6 +581,63 @@ struct T6805
     }
 }
 static assert(is(T6805.xxx.Type == int));
+
+/**********************************/
+// 6738
+
+version (none)
+{
+struct Foo6738
+{
+    int _val = 10;
+
+    @property int val()() { return _val; }
+    int get() { return val; }  // fail
+}
+
+void test6738()
+{
+    Foo6738 foo;
+    auto x = foo.val;  // ok
+    assert(x == 10);
+    assert(foo.get() == 10);
+}
+}
+else
+    void test6738() { }
+
+/**********************************/
+// 7498
+
+template IndexMixin(){
+    void insert(T)(T value){  }
+}
+
+class MultiIndexContainer{
+    mixin IndexMixin!() index0;
+    class Index0{
+        void baburk(){
+            this.outer.index0.insert(1);
+        }
+    }
+}
+
+/**********************************/
+// 6780
+
+@property int foo6780()(){ return 10; }
+
+int g6780;
+@property void bar6780()(int n){ g6780 = n; }
+
+void test6780()
+{
+    auto n = foo6780;
+    assert(n == 10);
+
+    bar6780 = 10;
+    assert(g6780 == 10);
+}
 
 /**********************************/
 // 6994
@@ -736,6 +856,63 @@ void test7124()
 }
 
 /**********************************/
+// 7359
+
+bool foo7359(T)(T[] a ...)
+{
+    return true;
+}
+
+void test7359()
+{
+    assert(foo7359(1,1,1,1,1,1));               // OK
+    assert(foo7359("abc","abc","abc","abc"));   // NG
+}
+
+/**********************************/
+// 7363
+
+template t7363()
+{
+   enum e = 0;
+   static if (true)
+       enum t7363 = 0;
+}
+static assert(!__traits(compiles, t7363!().t7363 == 0)); // Assertion fails
+static assert(t7363!() == 0); // Error: void has no value
+
+template u7363()
+{
+   static if (true)
+   {
+       enum e = 0;
+       enum u73631 = 0;
+   }
+   alias u73631 u7363;
+}
+static assert(!__traits(compiles, u7363!().u7363 == 0)); // Assertion fails
+static assert(u7363!() == 0); // Error: void has no value
+
+/**********************************/
+
+struct S4371(T ...) { }
+
+alias S4371!("hi!") t;
+
+static if (is(t U == S4371!(U))) { }
+
+/**********************************/
+// 7416
+
+void t7416(alias a)() if(is(typeof(a())))
+{}
+
+void test7416() {
+    void f() {}
+    alias t7416!f x;
+}
+
+/**********************************/
 
 int main()
 {
@@ -761,6 +938,9 @@ int main()
     test2778get();
     test6208a();
     test6208b();
+    test6208c();
+    test6738();
+    test6780();
     test6994();
     test3467();
     test4413();
@@ -768,6 +948,8 @@ int main()
     test10();
     test7037();
     test7124();
+    test7359();
+    test7416();
 
     printf("Success\n");
     return 0;

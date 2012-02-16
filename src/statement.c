@@ -521,10 +521,11 @@ Statement *CompoundStatement::semantic(Scope *sc)
                     i++;
                 }
                 if (sexception)
+                    sexception = sexception->semantic(sc);
+                if (sexception)
                 {
                     if (i + 1 == statements->dim && !sfinally)
                     {
-                        sexception = sexception->semantic(sc);
                     }
                     else
                     {
@@ -546,7 +547,7 @@ Statement *CompoundStatement::semantic(Scope *sc)
 
                         Identifier *id = Lexer::uniqueId("__o");
 
-                        Statement *handler = sexception->semantic(sc);
+                        Statement *handler = sexception;
                         if (sexception->blockExit(FALSE) & BEfallthru)
                         {   handler = new ThrowStatement(0, new IdentifierExp(0, id));
                             handler = new CompoundStatement(0, sexception, handler);
@@ -1442,12 +1443,12 @@ Statement *ForeachStatement::semantic(Scope *sc)
             n = te->exps->dim;
 
             if (te->exps->dim > 0 && (*te->exps)[0]->op == TOKdotvar &&
-            	((DotVarExp *)(*te->exps)[0])->e1->isTemp())
+                ((DotVarExp *)(*te->exps)[0])->e1->isTemp())
             {
                 CommaExp *ce = (CommaExp *)((DotVarExp *)(*te->exps)[0])->e1;
 
-				prelude = ce->e1;
-				((DotVarExp *)(*te->exps)[0])->e1 = ce->e2;
+                                prelude = ce->e1;
+                                ((DotVarExp *)(*te->exps)[0])->e1 = ce->e2;
             }
         }
         else if (aggr->op == TOKtype)   // type tuple
@@ -2986,33 +2987,7 @@ Statement *SwitchStatement::semantic(Scope *sc)
         ;
     }
 
-    if (!sc->sw->sdefault && !isFinal)
-    {   hasNoDefault = 1;
-
-        if (!global.params.useDeprecated)
-           error("non-final switch statement without a default is deprecated");
-
-        // Generate runtime error if the default is hit
-        Statements *a = new Statements();
-        CompoundStatement *cs;
-        Statement *s;
-
-        if (global.params.useSwitchError)
-            s = new SwitchErrorStatement(loc);
-        else
-        {   Expression *e = new HaltExp(loc);
-            s = new ExpStatement(loc, e);
-        }
-
-        a->reserve(4);
-        a->push(body);
-        a->push(new BreakStatement(loc, NULL));
-        sc->sw->sdefault = new DefaultStatement(loc, s);
-        a->push(sc->sw->sdefault);
-        cs = new CompoundStatement(loc, a);
-        body = cs;
-    }
-
+    bool needswitcherror = FALSE;
 #if DMDV2
     if (isFinal)
     {   Type *t = condition->type;
@@ -3041,8 +3016,36 @@ Statement *SwitchStatement::semantic(Scope *sc)
                 ;
             }
         }
+        else
+            needswitcherror = TRUE;
     }
 #endif
+
+    if (!sc->sw->sdefault && (!isFinal || needswitcherror))
+    {   hasNoDefault = 1;
+
+        if (!global.params.useDeprecated && !isFinal)
+           error("non-final switch statement without a default is deprecated");
+
+        // Generate runtime error if the default is hit
+        Statements *a = new Statements();
+        CompoundStatement *cs;
+        Statement *s;
+
+        if (global.params.useSwitchError)
+            s = new SwitchErrorStatement(loc);
+        else
+        {   Expression *e = new HaltExp(loc);
+            s = new ExpStatement(loc, e);
+        }
+
+        a->reserve(2);
+        sc->sw->sdefault = new DefaultStatement(loc, s);
+        a->push(sc->sw->sdefault);
+        a->push(body);
+        cs = new CompoundStatement(loc, a);
+        body = cs;
+    }
 
     sc->pop();
     return this;
@@ -3676,7 +3679,7 @@ Statement *ReturnStatement::semantic(Scope *sc)
         else
         {
             ((TypeFunction *)fd->type)->next = Type::tvoid;
-            fd->type = fd->type->semantic(loc, sc);
+            //fd->type = fd->type->semantic(loc, sc);   // Remove with7321, same as 6902
             if (!fd->tintro)
             {   tret = Type::tvoid;
                 tbret = tret;
@@ -4415,6 +4418,7 @@ Catch::Catch(Loc loc, Type *t, Identifier *id, Statement *handler)
     this->ident = id;
     this->handler = handler;
     var = NULL;
+    internalCatch = false;
 }
 
 Catch *Catch::syntaxCopy()
@@ -4423,6 +4427,7 @@ Catch *Catch::syntaxCopy()
         (type ? type->syntaxCopy() : NULL),
         ident,
         (handler ? handler->syntaxCopy() : NULL));
+    c->internalCatch = internalCatch;
     return c;
 }
 
@@ -4461,6 +4466,7 @@ void Catch::semantic(Scope *sc)
     }
     else if (sc->func &&
         !sc->intypeof &&
+        !internalCatch &&
         cd != ClassDeclaration::exception &&
         !ClassDeclaration::exception->isBaseOf(cd, NULL) &&
         sc->func->setUnsafe())

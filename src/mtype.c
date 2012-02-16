@@ -1,6 +1,6 @@
 
 // Compiler implementation of the D programming language
-// Copyright (c) 1999-2011 by Digital Mars
+// Copyright (c) 1999-2012 by Digital Mars
 // All Rights Reserved
 // written by Walter Bright
 // http://www.digitalmars.com
@@ -170,7 +170,7 @@ char Type::needThisPrefix()
 
 void Type::init()
 {
-    stringtable.init();
+    stringtable.init(1543);
     Lexer::initKeywords();
 
     for (size_t i = 0; i < TMAX; i++)
@@ -1284,6 +1284,13 @@ Type *Type::aliasthisOf()
             }
             return t;
         }
+        EnumDeclaration *ed = ad->aliasthis->isEnumDeclaration();
+        if (ed)
+        {
+            Type *t = ed->type;
+            return t;
+        }
+        //printf("%s\n", ad->aliasthis->kind());
     }
     return NULL;
 }
@@ -1321,6 +1328,31 @@ int MODimplicitConv(unsigned char modfrom, unsigned char modto)
         case X(MODimmutable, MODconst | MODshared):
         case X(MODshared,    MODconst | MODshared):
         case X(MODwild | MODshared,    MODconst | MODshared):
+            return 1;
+
+        default:
+            return 0;
+    }
+    #undef X
+}
+
+/***************************
+ * Return !=0 if a method of type '() modfrom' can call a method of type '() modto'.
+ */
+int MODmethodConv(unsigned char modfrom, unsigned char modto)
+{
+    if (MODimplicitConv(modfrom, modto))
+        return 1;
+
+    #define X(m, n) (((m) << 4) | (n))
+    switch (X(modfrom, modto))
+    {
+        case X(0, MODwild):
+        case X(MODimmutable, MODwild):
+        case X(MODconst, MODwild):
+        case X(MODshared, MODshared|MODwild):
+        case X(MODshared|MODimmutable, MODshared|MODwild):
+        case X(MODshared|MODconst, MODshared|MODwild):
             return 1;
 
         default:
@@ -2050,8 +2082,9 @@ Expression *Type::noMember(Scope *sc, Expression *e, Identifier *ident)
             tiargs->push(se);
             e = new DotTemplateInstanceExp(e->loc, e, Id::opDispatch, tiargs);
             ((DotTemplateInstanceExp *)e)->ti->tempdecl = td;
+            //return e;
+            e = e->semantic(sc);
             return e;
-            //return e->semantic(sc);
         }
 
         /* See if we should forward to the alias this.
@@ -4051,8 +4084,9 @@ Type *TypeDArray::semantic(Loc loc, Scope *sc)
         case Tnone:
         case Ttuple:
             error(loc, "can't have array of %s", tbn->toChars());
-            tn = next = tint32;
-            break;
+        case Terror:
+            return Type::terror;
+
         case Tstruct:
         {   TypeStruct *ts = (TypeStruct *)tbn;
             if (0 && ts->sym->isnested)
@@ -4293,6 +4327,7 @@ printf("index->ito->ito = x%x\n", index->ito->ito);
         case Tnone:
         case Ttuple:
             error(loc, "can't have associative array key of %s", index->toBasetype()->toChars());
+        case Terror:
             return Type::terror;
     }
     next = next->semantic(loc,sc);
@@ -4304,6 +4339,7 @@ printf("index->ito->ito = x%x\n", index->ito->ito);
         case Tvoid:
         case Tnone:
             error(loc, "can't have associative array of %s", next->toChars());
+        case Terror:
             return Type::terror;
     }
     if (next->isscope())
@@ -4616,8 +4652,8 @@ Type *TypePointer::semantic(Loc loc, Scope *sc)
     {
         case Ttuple:
             error(loc, "can't have pointer to %s", n->toChars());
-            n = tint32;
-            break;
+        case Terror:
+            return Type::terror;
     }
     if (n != next)
     {
@@ -4965,6 +5001,8 @@ int Type::covariant(Type *t)
 
         // If t1n is forward referenced:
         ClassDeclaration *cd = ((TypeClass *)t1n)->sym;
+//        if (cd->scope)
+//            cd->semantic(NULL);
 #if 0
         if (!cd->baseClass && cd->baseclasses->dim && !cd->isInterfaceDeclaration())
 #else
@@ -5665,13 +5703,18 @@ int TypeFunction::callMatch(Expression *ethis, Expressions *args, int flag)
         Type *tprm = wildmatch ? p->type->substWildTo(wildmatch) : p->type;
 
         // Non-lvalues do not match ref or out parameters
-        if (p->storageClass & (STCref | STCout))
-        {   if (!arg->isLvalue())
-                goto Nomatch;
-        }
-
         if (p->storageClass & STCref)
-        {
+        {   if (!arg->isLvalue())
+            {   if (arg->op == TOKstring && tprm->ty == Tsarray)
+                {   if (targ->ty != Tsarray)
+                        targ = new TypeSArray(targ->nextOf(),
+                                new IntegerExp(0, ((StringExp *)arg)->len,
+                                Type::tindex));
+                }
+                else
+                    goto Nomatch;
+            }
+
             /* Don't allow static arrays to be passed to mutable references
              * to static arrays if the argument cannot be modified.
              */
@@ -5684,7 +5727,11 @@ int TypeFunction::callMatch(Expression *ethis, Expressions *args, int flag)
                 goto Nomatch;
 
             // ref variable behaves like head-const reference
-            if (arg->op != TOKstring && !targb->constConv(tprmb))
+            if (!targb->constConv(tprmb))
+                goto Nomatch;
+        }
+        else if (p->storageClass & STCout)
+        {   if (!arg->isLvalue())
                 goto Nomatch;
         }
 
@@ -6141,13 +6188,9 @@ void TypeQualified::resolveHelper(Loc loc, Scope *sc,
                     for (; i < idents.dim; i++)
                     {
                         id = idents.tdata()[i];
-                        //printf("e: '%s', id: '%s', type = %p\n", e->toChars(), id->toChars(), e->type);
-                        if (id == Id::offsetof || !e->type)
-                        {   e = new DotIdExp(e->loc, e, id);
-                            e = e->semantic(sc);
-                        }
-                        else
-                            e = e->type->dotExp(sc, e, id);
+                        //printf("e: '%s', id: '%s', type = %s\n", e->toChars(), id->toChars(), e->type->toChars());
+                        e = new DotIdExp(e->loc, e, id);
+                        e = e->semantic(sc);
                     }
                     if (e->op == TOKtype)
                         *pt = e->type;
@@ -6479,7 +6522,9 @@ void TypeInstance::resolve(Loc loc, Scope *sc, Expression **pe, Type **pt, Dsymb
     //printf("TypeInstance::resolve(sc = %p, idents = '%s')\n", sc, id->toChars());
     s = tempinst;
     if (s)
+    {   //printf("s = %s\n", s->toChars());
         s->semantic(sc);
+    }
     resolveHelper(loc, sc, s, NULL, pe, pt, ps);
     if (*pt)
         *pt = (*pt)->addMod(mod);
@@ -6646,6 +6691,7 @@ Type *TypeTypeof::semantic(Loc loc, Scope *sc)
     {
         Scope *sc2 = sc->push();
         sc2->intypeof++;
+        sc2->flags |= sc->flags & SCOPEstaticif;
         exp = exp->semantic(sc2);
 #if DMDV2
         if (exp->type && exp->type->ty == Tfunction &&
@@ -7524,7 +7570,7 @@ L1:
     if (td)
     {
         e = new DotTemplateExp(e->loc, e, td);
-        e->semantic(sc);
+        e = e->semantic(sc);
         return e;
     }
 
@@ -7807,7 +7853,10 @@ unsigned TypeStruct::wildConvTo(Type *tprm)
         return Type::wildConvTo(tprm);
 
     if (sym->aliasthis)
-        return aliasthisOf()->wildConvTo(tprm);
+    {   Type *t = aliasthisOf();
+        assert(t);
+        return t->wildConvTo(tprm);
+    }
 
     return 0;
 }
@@ -7901,7 +7950,18 @@ Expression *TypeClass::dotExp(Scope *sc, Expression *e, Identifier *ident)
         /* Create a TupleExp
          */
         e = e->semantic(sc);    // do this before turning on noaccesscheck
-        e->type->size();        // do semantic of type
+
+        /* If this is called in the middle of a class declaration,
+         *  class Inner {
+         *    int x;
+         *    alias typeof(Inner.tupleof) T;
+         *    int y;
+         *  }
+         * then Inner.y will be omitted from the tuple.
+         */
+        // Detect that error, and at least try to run semantic() on it if we can
+        sym->size(e->loc);
+
         Expressions *exps = new Expressions;
         exps->reserve(sym->fields.dim);
 
@@ -8068,7 +8128,7 @@ L1:
     if (td)
     {
         e = new DotTemplateExp(e->loc, e, td);
-        e->semantic(sc);
+        e = e->semantic(sc);
         return e;
     }
 
@@ -8218,9 +8278,14 @@ MATCH TypeClass::implicitConvTo(Type *to)
         return m;
 
     ClassDeclaration *cdto = to->isClassHandle();
-    if (cdto && cdto->isBaseOf(sym, NULL))
-    {   //printf("'to' is base\n");
-        return MATCHconvert;
+    if (cdto)
+    {
+        if (cdto->scope)
+            cdto->semantic(NULL);
+        if (cdto->isBaseOf(sym, NULL))
+        {   //printf("'to' is base\n");
+            return MATCHconvert;
+        }
     }
 
     if (global.params.Dversion == 1)

@@ -1,6 +1,6 @@
 
 // Compiler implementation of the D programming language
-// Copyright (c) 1999-2011 by Digital Mars
+// Copyright (c) 1999-2012 by Digital Mars
 // All Rights Reserved
 // written by Walter Bright
 // http://www.digitalmars.com
@@ -281,6 +281,8 @@ int arrayObjectMatch(Objects *oa1, Objects *oa2, TemplateDeclaration *tempdecl, 
 }
 
 /****************************************
+ * This makes a 'pretty' version of the template arguments.
+ * It's analogous to genIdent() which makes a mangled version.
  */
 
 void ObjectToCBuffer(OutBuffer *buf, HdrGenState *hgs, Object *oarg)
@@ -290,12 +292,21 @@ void ObjectToCBuffer(OutBuffer *buf, HdrGenState *hgs, Object *oarg)
     Expression *e = isExpression(oarg);
     Dsymbol *s = isDsymbol(oarg);
     Tuple *v = isTuple(oarg);
+    /* The logic of this should match what genIdent() does. The _dynamic_cast()
+     * function relies on all the pretty strings to be unique for different classes
+     * (see Bugzilla 7375).
+     * Perhaps it would be better to demangle what genIdent() does.
+     */
     if (t)
     {   //printf("\tt: %s ty = %d\n", t->toChars(), t->ty);
         t->toCBuffer(buf, NULL, hgs);
     }
     else if (e)
+    {
+        if (e->op == TOKvar)
+            e = e->optimize(WANTvalue);         // added to fix Bugzilla 7375
         e->toCBuffer(buf, hgs);
+    }
     else if (s)
     {
         char *p = s->ident ? s->ident->toChars() : s->toChars();
@@ -308,7 +319,7 @@ void ObjectToCBuffer(OutBuffer *buf, HdrGenState *hgs, Object *oarg)
         {
             if (i)
                 buf->writeByte(',');
-            Object *o = args->tdata()[i];
+            Object *o = (*args)[i];
             ObjectToCBuffer(buf, hgs, o);
         }
     }
@@ -749,6 +760,13 @@ MATCH TemplateDeclaration::matchWithInstance(TemplateInstance *ti,
         makeParamNamesVisibleInConstraint(paramscope, fargs);
         Expression *e = constraint->syntaxCopy();
         Scope *sc = paramscope->push();
+
+        /* There's a chicken-and-egg problem here. We don't know yet if this template
+         * instantiation will be a local one (isnested is set), and we won't know until
+         * after selecting the correct template. Thus, function we're nesting inside
+         * is not on the sc scope chain, and this can cause errors in FuncDeclaration::getLevel().
+         * Workaround the problem by setting a flag to relax the checking on frame errors.
+         */
         sc->flags |= SCOPEstaticif;
 
         FuncDeclaration *fd = onemember && onemember->toAlias() ?
@@ -1071,6 +1089,9 @@ MATCH TemplateDeclaration::deduceFunctionTemplateMatch(Scope *sc, Loc loc, Objec
                 if (tp_is_declared)
                     goto L2;
 
+                // Apply function parameter storage classes to parameter type
+                tid = (TypeIdentifier *)tid->addStorageClass(fparam->storageClass);
+
                 /* The types of the function arguments
                  * now form the tuple argument.
                  */
@@ -1081,7 +1102,172 @@ MATCH TemplateDeclaration::deduceFunctionTemplateMatch(Scope *sc, Loc loc, Objec
                 t->objects.setDim(tuple_dim);
                 for (size_t i = 0; i < tuple_dim; i++)
                 {   Expression *farg = fargs->tdata()[fptupindex + i];
-                    t->objects.tdata()[i] = farg->type;
+                    unsigned mod = farg->type->mod;
+                    Type *tt;
+                    MATCH m;
+
+                    #define X(U,T)  ((U) << 4) | (T)
+                    if (tid->mod & MODwild)
+                    {
+                        switch (X(tid->mod, mod))
+                        {
+                            case X(MODwild,              MODwild):
+                            case X(MODwild | MODshared,  MODwild | MODshared):
+                            case X(MODwild,              0):
+                            case X(MODwild,              MODconst):
+                            case X(MODwild,              MODimmutable):
+                            case X(MODwild | MODshared,  MODshared):
+                            case X(MODwild | MODshared,  MODconst | MODshared):
+
+                                if (mod & MODwild)
+                                    wildmatch |= MODwild;
+                                else if (mod == 0)
+                                    wildmatch |= MODmutable;
+                                else
+                                    wildmatch |= (mod & ~MODshared);
+                                tt = farg->type->mutableOf();
+                                m = MATCHconst;
+                                goto Lx;
+
+                            default:
+                                break;
+                        }
+                    }
+
+                    switch (X(tid->mod, mod))
+                    {
+                        case X(0, 0):
+                        case X(0, MODconst):
+                        case X(0, MODimmutable):
+                        case X(0, MODshared):
+                        case X(0, MODconst | MODshared):
+                        case X(0, MODwild):
+                        case X(0, MODwild | MODshared):
+                            // foo(U:U) T                              => T
+                            // foo(U:U) const(T)                       => const(T)
+                            // foo(U:U) immutable(T)                   => immutable(T)
+                            // foo(U:U) shared(T)                      => shared(T)
+                            // foo(U:U) const(shared(T))               => const(shared(T))
+                            // foo(U:U) wild(T)                        => wild(T)
+                            // foo(U:U) wild(shared(T))                => wild(shared(T))
+
+                            tt = farg->type;
+                            m = MATCHexact;
+                            break;
+
+                        case X(MODconst, MODconst):
+                        case X(MODimmutable, MODimmutable):
+                        case X(MODshared, MODshared):
+                        case X(MODconst | MODshared, MODconst | MODshared):
+                        case X(MODwild, MODwild):
+                        case X(MODwild | MODshared, MODwild | MODshared):
+                            // foo(U:const(U))        const(T)         => T
+                            // foo(U:immutable(U))    immutable(T)     => T
+                            // foo(U:shared(U))       shared(T)        => T
+                            // foo(U:const(shared(U)) const(shared(T)) => T
+                            // foo(U:wild(U))         wild(T)          => T
+                            // foo(U:wild(shared(U))  wild(shared(T)) => T
+
+                            tt = farg->type->mutableOf()->unSharedOf();
+                            m = MATCHexact;
+                            break;
+
+                        case X(MODconst, 0):
+                        case X(MODconst, MODimmutable):
+                        case X(MODconst, MODconst | MODshared):
+                        case X(MODconst | MODshared, MODimmutable):
+                        case X(MODconst, MODwild):
+                        case X(MODconst, MODwild | MODshared):
+                            // foo(U:const(U)) T                       => T
+                            // foo(U:const(U)) immutable(T)            => T
+                            // foo(U:const(U)) const(shared(T))        => shared(T)
+                            // foo(U:const(shared(U)) immutable(T)     => T
+                            // foo(U:const(U)) wild(shared(T))         => shared(T)
+
+                            tt = farg->type->mutableOf();
+                            m = MATCHconst;
+                            break;
+
+                        case X(MODshared, MODconst | MODshared):
+                        case X(MODconst | MODshared, MODshared):
+                        case X(MODshared, MODwild | MODshared):
+                            // foo(U:shared(U)) const(shared(T))       => const(T)
+                            // foo(U:const(shared(U)) shared(T)        => T
+                            // foo(U:shared(U)) wild(shared(T))        => wild(T)
+                            tt = farg->type->unSharedOf();
+                            m = MATCHconst;
+                            break;
+
+                        case X(MODimmutable,         0):
+                        case X(MODimmutable,         MODconst):
+                        case X(MODimmutable,         MODshared):
+                        case X(MODimmutable,         MODconst | MODshared):
+                        case X(MODconst,             MODshared):
+                        case X(MODshared,            0):
+                        case X(MODshared,            MODconst):
+                        case X(MODshared,            MODimmutable):
+                        case X(MODconst | MODshared, 0):
+                        case X(MODconst | MODshared, MODconst):
+                        case X(MODimmutable,         MODwild):
+                        case X(MODshared,            MODwild):
+                        case X(MODconst | MODshared, MODwild):
+                        case X(MODwild,              0):
+                        case X(MODwild,              MODconst):
+                        case X(MODwild,              MODimmutable):
+                        case X(MODwild,              MODshared):
+                        case X(MODwild,              MODconst | MODshared):
+                        case X(MODwild | MODshared,  0):
+                        case X(MODwild | MODshared,  MODconst):
+                        case X(MODwild | MODshared,  MODimmutable):
+                        case X(MODwild | MODshared,  MODshared):
+                        case X(MODwild | MODshared,  MODconst | MODshared):
+                        case X(MODwild | MODshared,  MODwild):
+                        case X(MODimmutable,         MODwild | MODshared):
+                        case X(MODconst | MODshared, MODwild | MODshared):
+                        case X(MODwild,              MODwild | MODshared):
+
+                            // foo(U:immutable(U)) T                   => nomatch
+                            // foo(U:immutable(U)) const(T)            => nomatch
+                            // foo(U:immutable(U)) shared(T)           => nomatch
+                            // foo(U:immutable(U)) const(shared(T))    => nomatch
+                            // foo(U:const(U)) shared(T)               => nomatch
+                            // foo(U:shared(U)) T                      => nomatch
+                            // foo(U:shared(U)) const(T)               => nomatch
+                            // foo(U:shared(U)) immutable(T)           => nomatch
+                            // foo(U:const(shared(U)) T                => nomatch
+                            // foo(U:const(shared(U)) const(T)         => nomatch
+                            // foo(U:immutable(U)) wild(T)             => nomatch
+                            // foo(U:shared(U)) wild(T)                => nomatch
+                            // foo(U:const(shared(U)) wild(T)          => nomatch
+                            // foo(U:wild(U)) T                        => nomatch
+                            // foo(U:wild(U)) const(T)                 => nomatch
+                            // foo(U:wild(U)) immutable(T)             => nomatch
+                            // foo(U:wild(U)) shared(T)                => nomatch
+                            // foo(U:wild(U)) const(shared(T))         => nomatch
+                            // foo(U:wild(shared(U)) T                 => nomatch
+                            // foo(U:wild(shared(U)) const(T)          => nomatch
+                            // foo(U:wild(shared(U)) immutable(T)      => nomatch
+                            // foo(U:wild(shared(U)) shared(T)         => nomatch
+                            // foo(U:wild(shared(U)) const(shared(T))  => nomatch
+                            // foo(U:wild(shared(U)) wild(T)           => nomatch
+                            // foo(U:immutable(U)) wild(shared(T))     => nomatch
+                            // foo(U:const(shared(U))) wild(shared(T)) => nomatch
+                            // foo(U:wild(U)) wild(shared(T))          => nomatch
+                            m = MATCHnomatch;
+                            break;
+
+                        default:
+                            assert(0);
+                    }
+                    #undef X
+
+                Lx:
+                    if (m == MATCHnomatch)
+                        goto Lnomatch;
+                    if (m < match)
+                        match = m;
+
+                    t->objects.tdata()[i] = tt;
                 }
                 declareParameter(paramscope, tp, t);
                 goto L2;
@@ -1149,7 +1335,7 @@ L2:
                 mod &= ~STCwild;
             if (tthis->mod != mod)
             {
-                if (!MODimplicitConv(tthis->mod, mod))
+                if (!MODmethodConv(tthis->mod, mod))
                     goto Lnomatch;
                 if (MATCHconst < match)
                     match = MATCHconst;
@@ -1248,6 +1434,9 @@ Lretry:
             }
 #endif
 
+            if (fvarargs == 2 && i + 1 == nfparams && i + 1 < nfargs)
+                goto Lvarargs;
+
             MATCH m;
             m = argtype->deduceType(paramscope, fparam->type, parameters, &dedtypes,
                 tf->hasWild() ? &wildmatch : NULL);
@@ -1284,12 +1473,17 @@ Lretry:
                     ad = ((TypeStruct *)tba)->sym;
             Lad:
                     if (ad->aliasthis)
-                    {
+                    {   /* If a semantic error occurs while doing alias this,
+                         * eg purity(bug 7295), just regard it as not a match.
+                         */
+                        unsigned olderrors = global.startGagging();
                         Expression *e = new DotIdExp(farg->loc, farg, ad->aliasthis->ident);
                         e = e->semantic(sc);
                         e = resolveProperties(sc, e);
-                        farg = e;
-                        goto Lretry;
+                        if (!global.endGagging(olderrors))
+                        {   farg = e;
+                            goto Lretry;
+                        }
                     }
                 }
             }
@@ -1454,6 +1648,7 @@ Lmatch:
 #if DMDV2
     if (constraint)
     {   /* Check to see if constraint is satisfied.
+         * Most of this code appears twice; this is a good candidate for refactoring.
          */
         makeParamNamesVisibleInConstraint(paramscope, fargs);
         Expression *e = constraint->syntaxCopy();
@@ -4425,6 +4620,12 @@ void TemplateInstance::semantic(Scope *sc, Expressions *fargs)
         error("recursive expansion");
         fatal();
     }
+
+    for (size_t i = 0; i < members->dim; i++)
+    {   Dsymbol *s = (*members)[i];
+        s->setScope(sc2);
+    }
+
     for (size_t i = 0; i < members->dim; i++)
     {
         Dsymbol *s = members->tdata()[i];
@@ -4463,6 +4664,27 @@ void TemplateInstance::semantic(Scope *sc, Expressions *fargs)
                 ad->deferred = this;
             goto Laftersemantic;
         }
+    }
+
+    /* ConditionalDeclaration may introduce eponymous declaration,
+     * so we should find it once again after semantic.
+     */
+    if (members->dim)
+    {
+        Dsymbol *s;
+        if (Dsymbol::oneMembers(members, &s, tempdecl->ident) && s)
+        {
+            if (!aliasdecl || aliasdecl->toAlias() != s)
+            {
+                //printf("s->kind = '%s'\n", s->kind());
+                //s->print();
+                //printf("'%s', '%s'\n", s->ident->toChars(), tempdecl->ident->toChars());
+                //printf("setting aliasdecl 2\n");
+                aliasdecl = new AliasDeclaration(loc, s->ident, s);
+            }
+        }
+        else if (aliasdecl)
+            aliasdecl = NULL;
     }
 
     /* The problem is when to parse the initializer for a variable.
@@ -5094,6 +5316,8 @@ Identifier *TemplateInstance::genIdent(Objects *args)
             }
             // Now that we know it is not an alias, we MUST obtain a value
             ea = ea->optimize(WANTvalue | WANTinterpret);
+            if (ea->op == TOKerror)
+                continue;
 #if 1
             /* Use deco that matches what it would be for a function parameter
              */
@@ -5470,7 +5694,7 @@ const char *TemplateInstance::kind()
     return "template instance";
 }
 
-int TemplateInstance::oneMember(Dsymbol **ps)
+int TemplateInstance::oneMember(Dsymbol **ps, Identifier *ident)
 {
     *ps = NULL;
     return TRUE;
@@ -5644,7 +5868,7 @@ void TemplateMixin::semantic(Scope *sc)
 
     // Run semantic on each argument, place results in tiargs[]
     semanticTiargs(sc);
-    if (errors)
+    if (errors || arrayObjectIsError(tiargs))
         return;
 
     tempdecl = findBestMatch(sc, NULL);
@@ -5872,23 +6096,25 @@ const char *TemplateMixin::kind()
     return "mixin";
 }
 
-int TemplateMixin::oneMember(Dsymbol **ps)
+int TemplateMixin::oneMember(Dsymbol **ps, Identifier *ident)
 {
-    return Dsymbol::oneMember(ps);
+    return Dsymbol::oneMember(ps, ident);
 }
 
 int TemplateMixin::hasPointers()
 {
     //printf("TemplateMixin::hasPointers() %s\n", toChars());
-    for (size_t i = 0; i < members->dim; i++)
-    {
-        Dsymbol *s = members->tdata()[i];
-        //printf(" s = %s %s\n", s->kind(), s->toChars());
-        if (s->hasPointers())
+
+    if (members)
+        for (size_t i = 0; i < members->dim; i++)
         {
-            return 1;
+            Dsymbol *s = (*members)[i];
+            //printf(" s = %s %s\n", s->kind(), s->toChars());
+            if (s->hasPointers())
+            {
+                return 1;
+            }
         }
-    }
     return 0;
 }
 

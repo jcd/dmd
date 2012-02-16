@@ -385,6 +385,7 @@ struct StringExp : Expression
     int isBool(int result);
     int isLvalue();
     Expression *toLvalue(Scope *sc, Expression *e);
+    Expression *modifiableLvalue(Scope *sc, Expression *e);
     unsigned charAt(size_t i);
     void toCBuffer(OutBuffer *buf, HdrGenState *hgs);
     void toMangleBuffer(OutBuffer *buf);
@@ -628,6 +629,7 @@ struct VarExp : SymbolExp
     Expression *modifiableLvalue(Scope *sc, Expression *e);
     dt_t **toDt(dt_t **pdt);
 
+    int inlineCost3(InlineCostState *ics);
     Expression *doInline(InlineDoState *ids);
     //Expression *inlineScan(InlineScanState *iss);
 };
@@ -1684,5 +1686,12 @@ Expression *Cmp(enum TOK op, Type *type, Expression *e1, Expression *e2);
 Expression *Identity(enum TOK op, Type *type, Expression *e1, Expression *e2);
 
 Expression *Slice(Type *type, Expression *e1, Expression *lwr, Expression *upr);
+
+// Const-folding functions used by CTFE
+
+void sliceAssignArrayLiteralFromString(ArrayLiteralExp *existingAE, StringExp *newval, int firstIndex);
+void sliceAssignStringFromArrayLiteral(StringExp *existingSE, ArrayLiteralExp *newae, int firstIndex);
+void sliceAssignStringFromString(StringExp *existingSE, StringExp *newstr, int firstIndex);
+
 
 #endif /* DMD_EXPRESSION_H */

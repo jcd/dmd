@@ -626,7 +626,7 @@ struct FuncDeclaration : Declaration
     LabelDsymbol *searchLabel(Identifier *ident);
     AggregateDeclaration *isThis();
     AggregateDeclaration *isMember2();
-    int getLevel(Loc loc, FuncDeclaration *fd); // lexical nesting level difference
+    int getLevel(Loc loc, Scope *sc, FuncDeclaration *fd); // lexical nesting level difference
     void appendExp(Expression *e);
     void appendState(Statement *s);
     char *mangle();
@@ -648,6 +648,7 @@ struct FuncDeclaration : Declaration
     bool setUnsafe();
     virtual int isNested();
     int needThis();
+    int isVirtualMethod();
     virtual int isVirtual();
     virtual int isFinal();
     virtual int addPreInvariant();
@@ -661,6 +662,7 @@ struct FuncDeclaration : Declaration
     FuncDeclaration *isUnique();
     void checkNestedReference(Scope *sc, Loc loc);
     int needsClosure();
+    int hasNestedFrameRefs();
     Statement *mergeFrequire(Statement *);
     Statement *mergeFensure(Statement *);
     Parameters *getParameters(int *pvarargs);

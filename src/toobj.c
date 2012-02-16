@@ -1,5 +1,5 @@
 
-// Copyright (c) 1999-2011 by Digital Mars
+// Copyright (c) 1999-2012 by Digital Mars
 // All Rights Reserved
 // written by Walter Bright
 // http://www.digitalmars.com
@@ -345,6 +345,11 @@ void ClassDeclaration::toObjFile(int multiobj)
     enum_SC scclass;
 
     //printf("ClassDeclaration::toObjFile('%s')\n", toChars());
+
+    if (type->ty == Terror)
+    {   error("had semantic errors when compiling");
+        return;
+    }
 
     if (!members)
         return;
@@ -918,6 +923,11 @@ void InterfaceDeclaration::toObjFile(int multiobj)
 
     //printf("InterfaceDeclaration::toObjFile('%s')\n", toChars());
 
+    if (type->ty == Terror)
+    {   error("had semantic errors when compiling");
+        return;
+    }
+
     if (!members)
         return;
 
@@ -1083,6 +1093,11 @@ void StructDeclaration::toObjFile(int multiobj)
 {
     //printf("StructDeclaration::toObjFile('%s')\n", toChars());
 
+    if (type->ty == Terror)
+    {   error("had semantic errors when compiling");
+        return;
+    }
+
     if (multiobj && !hasStaticCtorOrDtor())
     {   obj_append(this);
         return;
@@ -1168,6 +1183,11 @@ void VarDeclaration::toObjFile(int multiobj)
 
     //printf("VarDeclaration::toObjFile(%p '%s' type=%s) protection %d\n", this, toChars(), type->toChars(), protection);
     //printf("\talign = %d\n", type->alignsize());
+
+    if (type->ty == Terror)
+    {   error("had semantic errors when compiling");
+        return;
+    }
 
     if (aliassym)
     {   toAlias()->toObjFile(0);
@@ -1299,6 +1319,11 @@ void TypedefDeclaration::toObjFile(int multiobj)
 {
     //printf("TypedefDeclaration::toObjFile('%s')\n", toChars());
 
+    if (type->ty == Terror)
+    {   error("had semantic errors when compiling");
+        return;
+    }
+
     if (global.params.symdebug)
         toDebug();
 
@@ -1333,6 +1358,11 @@ void TypedefDeclaration::toObjFile(int multiobj)
 void EnumDeclaration::toObjFile(int multiobj)
 {
     //printf("EnumDeclaration::toObjFile('%s')\n", toChars());
+
+    if (type->ty == Terror)
+    {   error("had semantic errors when compiling");
+        return;
+    }
 
 #if DMDV2
     if (isAnonymous())

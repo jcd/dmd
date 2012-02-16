@@ -1,6 +1,6 @@
 
 // Compiler implementation of the D programming language
-// Copyright (c) 1999-2011 by Digital Mars
+// Copyright (c) 1999-2012 by Digital Mars
 // All Rights Reserved
 // written by Walter Bright
 // http://www.digitalmars.com
@@ -678,8 +678,8 @@ Expression *BinExp::optimize(int result)
         {
             dinteger_t i2 = e2->toInteger();
             d_uns64 sz = e1->type->size() * 8;
-            if (i2 < 0 || i2 > sz)
-            {   error("shift assign by %jd is outside the range 0..%zu", i2, sz);
+            if (i2 < 0 || i2 >= sz)
+            {   error("shift assign by %jd is outside the range 0..%zu", i2, sz - 1);
                 e2 = new IntegerExp(0);
             }
         }
@@ -773,8 +773,8 @@ Expression *shift_optimize(int result, BinExp *e, Expression *(*shift)(Type *, E
     {
         dinteger_t i2 = e->e2->toInteger();
         d_uns64 sz = e->e1->type->size() * 8;
-        if (i2 < 0 || i2 > sz)
-        {   e->error("shift by %jd is outside the range 0..%zu", i2, sz);
+        if (i2 < 0 || i2 >= sz)
+        {   e->error("shift by %jd is outside the range 0..%zu", i2, sz - 1);
             e->e2 = new IntegerExp(0);
         }
         if (e->e1->isConst() == 1)
@@ -918,9 +918,6 @@ Expression *CommaExp::optimize(int result)
         e = interpret(NULL);
         return (e == EXP_CANT_INTERPRET) ?  this : e;
     }
-    // Don't constant fold if it is a compiler-generated temporary.
-    if (e1->op == TOKdeclaration)
-       return this;
 
     e1 = e1->optimize(result & WANTinterpret);
     e2 = e2->optimize(result);

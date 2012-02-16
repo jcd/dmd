@@ -3995,7 +3995,8 @@ float parse(ref string p)
 void test230()
 {
     float f;
-    f = parse( "123e+2" );
+    string s = "123e+2";
+    f = parse( s );
     //printf("f = %g\n", f);
     assert( f == 123e+2f );
 }
@@ -4622,6 +4623,122 @@ void test7290()
 
 /***************************************************/
 
+void test7367()
+{
+    char a = '\x00';
+    char b = '\xFF';
+    assert(a < b);
+} 
+
+/***************************************************/
+// 7375
+
+class A7375 {}
+class B7375(int i) : A7375 {}
+class C7375(int i) : B7375!i {}
+
+template DerivedAlias(int i)
+{
+    alias B7375!i DerivedAlias;
+}
+
+alias DerivedAlias!22 X7375;
+
+void test7375()
+{
+    A7375 foo = new C7375!11();
+    assert(cast(B7375!22)foo is null);
+}
+
+/***************************************************/
+
+void test6504()
+{
+    for (int i=0; i<3; ++i)
+    {
+/+
+	char[] x2 = "xxx" ~ ['c'];
+	if (i == 0)
+	    assert(x2[1] == 'x');
+	x2[1] = 'q';
++/
+    }
+}
+
+/***************************************************/
+
+struct S7424a
+{
+    @property inout(int) g()() inout { return 7424; }
+    void test1()
+    {
+        int f = g;
+        assert(f == 7424);
+        assert(g == 7424);
+    }
+    void test2() const
+    {
+        int f = g;
+        assert(f == 7424);
+        assert(g == 7424);
+    }
+    void test3() immutable
+    {
+        int f = g;
+        assert(f == 7424);
+        assert(g == 7424);
+    }
+}
+struct S7425
+{
+    inout(T) g(T)(T x) inout
+    {
+        return x;
+    }
+    void test1()
+    {
+        int f = g(2);
+        assert(f == 2);
+    }
+    void test2() const
+    {
+        double y = g(4.5);
+        assert(y == 4.5);
+    }
+}
+void test7424()
+{
+    S7424a s1;
+    s1.test1();
+    s1.test2();
+
+    immutable(S7424a) s2;
+    s2.test2();
+    s2.test3();
+
+    const(S7424a) s3;
+    s3.test2();
+
+    S7425 s4;
+    s4.test1();
+    s4.test2();
+}
+
+/***************************************************/
+
+struct Logger {
+    static bool info()() {
+	return false;
+    }
+}
+
+void test7422() {
+    if (Logger.info()) {
+    }
+}
+
+/***************************************************/
+
 int main()
 {
     test1();
@@ -4862,6 +4979,11 @@ int main()
     test7212();
     test242();
     test7290();
+    test7367();
+    test7375();
+    test6504();
+    test7422();
+    test7424();
 
     writefln("Success");
     return 0;
